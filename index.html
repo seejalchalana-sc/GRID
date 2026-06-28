@@ -16,6 +16,7 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
 :root{
   --bg: #07090D;
@@ -244,6 +245,29 @@ textarea#notesArea::placeholder{color:var(--muted-2);}
 .btn-confirm{background:var(--green); color:#07090D; border-color:var(--green);}
 .btn-danger{background:var(--red); color:#07090D; border-color:var(--red);}
 
+/* AUTH SCREEN */
+#authOverlay{position:fixed; inset:0; background:var(--bg); background-image:var(--bg-glow, none); z-index:200; display:flex; align-items:center; justify-content:center; padding:24px;}
+#authOverlay.hide{display:none;}
+.auth-card{width:100%; max-width:380px; background:var(--panel); border:1px solid var(--border-lit); border-radius:22px; padding:30px 24px;}
+.auth-logo{display:flex; align-items:center; gap:10px; margin-bottom:6px;}
+.auth-logo-dot{width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--green),#4A86E8); flex-shrink:0;}
+.auth-title{font-size:20px; font-weight:800; letter-spacing:0.3px;}
+.auth-sub{font-size:12.5px; color:var(--muted); margin:6px 0 22px;}
+.auth-tabs{display:flex; gap:6px; background:var(--bg-2,#0c0f16); border:1px solid var(--border); border-radius:13px; padding:4px; margin-bottom:18px;}
+.auth-tab{flex:1; text-align:center; padding:9px 0; border-radius:10px; font-size:12.5px; font-weight:700; color:var(--muted); cursor:pointer; border:none; background:none;}
+.auth-tab.sel{background:var(--green-dim); color:#9FE8C4;}
+.auth-card input{width:100%; background:var(--bg-2,#0c0f16); border:1px solid var(--border); border-radius:13px; padding:13px 14px; font-size:14px; margin-bottom:12px; color:var(--text);}
+.auth-card input::placeholder{color:var(--muted-2);}
+.auth-submit{width:100%; padding:14px 0; border-radius:13px; font-size:14px; font-weight:700; background:var(--green); color:#07090D; border:none; margin-top:4px;}
+.auth-submit:disabled{opacity:0.6;}
+.auth-error{font-size:12px; color:var(--red); margin-top:10px; min-height:14px;}
+.auth-skip{display:block; text-align:center; width:100%; margin-top:18px; font-size:12px; color:var(--muted-2); background:none; border:none; text-decoration:underline; cursor:pointer;}
+.auth-sync-badge{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); padding:8px 12px; border-radius:10px; background:var(--bg-2,#0c0f16); border:1px solid var(--border); margin-top:14px;}
+.sync-dot{width:7px; height:7px; border-radius:50%; background:var(--green); flex-shrink:0;}
+.sync-dot.syncing{background:#FAD165; animation:pulse 1s infinite;}
+.sync-dot.offline{background:var(--muted-2);}
+@keyframes pulse{0%,100%{opacity:1;} 50%{opacity:0.3;}}
+
 /* BOTTOM NAV */
 .bottomnav{
   position:fixed; bottom:0; left:0; right:0; background:rgba(7,9,13,0.85); backdrop-filter:blur(16px);
@@ -363,6 +387,29 @@ textarea#notesArea::placeholder{color:var(--muted-2);}
 </style>
 </head>
 <body>
+
+<div id="authOverlay">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="auth-logo-dot"></div>
+      <div class="auth-title">GRID</div>
+    </div>
+    <div class="auth-sub">Login to sync your habits, tasks and XP across your phone and laptop.</div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab sel" id="authTabLogin" onclick="setAuthMode('login')">Log In</button>
+      <button class="auth-tab" id="authTabSignup" onclick="setAuthMode('signup')">Sign Up</button>
+    </div>
+
+    <input type="email" id="authEmail" placeholder="Email" autocomplete="email">
+    <input type="password" id="authPassword" placeholder="Password" autocomplete="current-password">
+
+    <button class="auth-submit" id="authSubmitBtn" onclick="handleAuthSubmit()">Log In</button>
+    <div class="auth-error" id="authError"></div>
+
+    <button class="auth-skip" onclick="skipAuth()">Continue without account (local only)</button>
+  </div>
+</div>
 
 <div class="wrap">
   <div class="header">
@@ -798,6 +845,162 @@ const FLAME_SVG = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c1
 const STORAGE_KEY = 'grid-tracker-data-v1';
 const STORAGE_KEY_V2 = 'grid-tracker-data-v2';
 
+// ===== SUPABASE CLOUD SYNC =====
+const SUPABASE_URL = 'https://zapatdyywubahwwpufkc.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_SqJGInhc0wHb5cnD2KMWcQ_b_torD0a';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+let currentUser = null;
+let authMode = 'login';
+let syncTimer = null;
+let isSyncing = false;
+
+function setAuthMode(mode){
+  authMode = mode;
+  document.getElementById('authTabLogin').classList.toggle('sel', mode==='login');
+  document.getElementById('authTabSignup').classList.toggle('sel', mode==='signup');
+  document.getElementById('authSubmitBtn').textContent = mode==='login' ? 'Log In' : 'Sign Up';
+  document.getElementById('authError').textContent = '';
+}
+
+function showAuthError(msg){
+  document.getElementById('authError').textContent = msg;
+}
+
+async function handleAuthSubmit(){
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const btn = document.getElementById('authSubmitBtn');
+  if(!email || !password){ showAuthError('Enter email and password.'); return; }
+  if(password.length < 6){ showAuthError('Password must be at least 6 characters.'); return; }
+
+  btn.disabled = true;
+  showAuthError('');
+  try{
+    let result;
+    if(authMode==='signup'){
+      result = await sb.auth.signUp({ email, password });
+    }else{
+      result = await sb.auth.signInWithPassword({ email, password });
+    }
+    if(result.error){ showAuthError(result.error.message); btn.disabled=false; return; }
+    currentUser = result.data.user;
+    await afterLogin();
+  }catch(e){
+    showAuthError('Something went wrong. Try again.');
+    btn.disabled = false;
+  }
+}
+
+function skipAuth(){
+  document.getElementById('authOverlay').classList.add('hide');
+  migrateOldData();
+  finishBoot();
+}
+
+async function afterLogin(){
+  document.getElementById('authOverlay').classList.add('hide');
+  await pullAndMergeCloudData();
+  finishBoot();
+  showSyncBadge();
+}
+
+// Pull cloud data on login. If cloud has data, merge it with local (cloud wins on conflict
+// for simplicity, since this is a single-user personal tracker). If cloud is empty, push local up.
+async function pullAndMergeCloudData(){
+  try{
+    const { data: rows, error } = await sb.from('grid_data').select('data').eq('user_id', currentUser.id).maybeSingle();
+    if(error){ console.warn('Cloud pull failed:', error.message); migrateOldData(); return; }
+
+    // load local first so we have something to compare/fallback to
+    migrateOldData();
+
+    if(rows && rows.data && Object.keys(rows.data).length){
+      // cloud has real data -> use it as source of truth
+      data = Object.assign(data, rows.data);
+      ensureDefaults();
+      save();
+    } else {
+      // no cloud data yet -> push current local data up
+      await pushToCloud();
+    }
+  }catch(e){
+    console.warn('Sync error:', e);
+    migrateOldData();
+  }
+}
+
+async function pushToCloud(){
+  if(!currentUser) return;
+  isSyncing = true;
+  updateSyncDot('syncing');
+  try{
+    await sb.from('grid_data').upsert({
+      user_id: currentUser.id,
+      data: data,
+      updated_at: new Date().toISOString()
+    });
+    updateSyncDot('synced');
+  }catch(e){
+    console.warn('Push failed:', e);
+    updateSyncDot('offline');
+  }
+  isSyncing = false;
+}
+
+// Debounced cloud push — called every time save() runs, but waits 1.5s of inactivity
+// so we don't hammer the API on every single click.
+function queueCloudSync(){
+  if(!currentUser) return;
+  if(syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(pushToCloud, 1500);
+}
+
+function showSyncBadge(){
+  const header = document.querySelector('.header');
+  if(!header || document.getElementById('syncBadge')) return;
+  const badge = document.createElement('div');
+  badge.id = 'syncBadge';
+  badge.className = 'auth-sync-badge';
+  badge.style.margin = '8px 16px 0';
+  badge.innerHTML = '<span class="sync-dot" id="syncDot"></span><span id="syncText">Synced to cloud</span> · <span style="text-decoration:underline; cursor:pointer;" onclick="handleLogout()">Log out</span>';
+  header.insertAdjacentElement('afterend', badge);
+}
+
+function updateSyncDot(state){
+  const dot = document.getElementById('syncDot');
+  const text = document.getElementById('syncText');
+  if(!dot) return;
+  dot.className = 'sync-dot' + (state==='syncing' ? ' syncing' : state==='offline' ? ' offline' : '');
+  if(text) text.textContent = state==='syncing' ? 'Syncing…' : state==='offline' ? 'Offline — will retry' : 'Synced to cloud';
+}
+
+async function handleLogout(){
+  await sb.auth.signOut();
+  currentUser = null;
+  const badge = document.getElementById('syncBadge');
+  if(badge) badge.remove();
+  document.getElementById('authOverlay').classList.remove('hide');
+  document.getElementById('authEmail').value = '';
+  document.getElementById('authPassword').value = '';
+}
+
+// On page load, check if a session already exists (so user doesn't need to re-login every time)
+async function checkExistingSession(){
+  try{
+    const { data: sessionData } = await sb.auth.getSession();
+    if(sessionData && sessionData.session && sessionData.session.user){
+      currentUser = sessionData.session.user;
+      await afterLogin();
+      return true;
+    }
+  }catch(e){}
+  return false;
+}
+// ===== END SUPABASE CLOUD SYNC =====
+
+
+
 const DEFAULT_CATEGORIES = [
   {id:'fitness', name:'Fitness', emoji:'💪', builtin:true},
   {id:'study', name:'Study', emoji:'📚', builtin:true},
@@ -919,6 +1122,7 @@ function ensureDefaults(){
 
 function save(){
   try{ localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(data)); }catch(e){}
+  queueCloudSync();
 }
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -2510,12 +2714,21 @@ document.getElementById('weeklyReviewClose').addEventListener('click', ()=>{
   document.getElementById('weeklyReviewOverlay').classList.remove('show');
 });
 
-migrateOldData();
-document.getElementById('taskDateInput').value = todayKey(new Date());
-selectedQuickDateOffset = 0;
-renderTaskQuickDateRow();
-renderAll();
-setTimeout(maybeShowWeeklyReview, 600);
+function finishBoot(){
+  document.getElementById('taskDateInput').value = todayKey(new Date());
+  selectedQuickDateOffset = 0;
+  renderTaskQuickDateRow();
+  renderAll();
+  setTimeout(maybeShowWeeklyReview, 600);
+}
+
+// Boot sequence: check if already logged in (session persists across visits).
+// If yes -> pull cloud data and go straight in. If no -> show login screen and wait.
+checkExistingSession().then((loggedIn) => {
+  if(!loggedIn){
+    // auth overlay stays visible; user will either log in, sign up, or skip
+  }
+});
 
 // Register service worker for offline + installable support
 if ('serviceWorker' in navigator) {
