@@ -1,6 +1,6 @@
 // GRID Service Worker — offline caching
 // Bump CACHE_VERSION whenever you deploy an update, so users get fresh files.
-const CACHE_VERSION = 'grid-v1';
+const CACHE_VERSION = 'grid-v2';
 const CACHE_NAME = `grid-cache-${CACHE_VERSION}`;
 
 const PRECACHE_URLS = [
@@ -42,8 +42,18 @@ self.addEventListener('activate', (event) => {
 
 // Fetch: network-first for navigation (so updates are picked up when online),
 // fallback to cache when offline. Cache-first for static assets (icons etc).
+// IMPORTANT: only GET requests to our own origin are eligible for caching.
+// POST/PUT/PATCH calls (e.g. Supabase sync) and any cross-origin requests
+// must bypass the cache entirely — the Cache API only supports GET, and
+// trying to cache a POST throws and silently breaks the request.
 self.addEventListener('fetch', (event) => {
   const { request } = event;
+
+  // Let non-GET requests (Supabase POST/PATCH/etc) and cross-origin requests
+  // go straight to the network, untouched by the cache.
+  if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) {
+    return; // do not call respondWith -> browser handles it normally
+  }
 
   if (request.mode === 'navigate' || request.destination === 'document') {
     event.respondWith(
