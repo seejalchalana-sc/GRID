@@ -854,6 +854,7 @@ let currentUser = null;
 let authMode = 'login';
 let syncTimer = null;
 let isSyncing = false;
+let blockCloudSync = false;
 
 function setAuthMode(mode){
   authMode = mode;
@@ -908,9 +909,16 @@ async function afterLogin(){
 // Pull cloud data on login. If cloud has data, merge it with local (cloud wins on conflict
 // for simplicity, since this is a single-user personal tracker). If cloud is empty, push local up.
 async function pullAndMergeCloudData(){
+  // Block any cloud push while we're in the middle of pulling — otherwise migrateOldData()'s
+  // internal save() can queue a push of STALE local data that later overwrites the fresh
+  // cloud data we're about to load (race condition).
+  const wasBlocked = blockCloudSync;
+  blockCloudSync = true;
+  if(syncTimer){ clearTimeout(syncTimer); syncTimer = null; }
+
   try{
     const { data: rows, error } = await sb.from('grid_data').select('data').eq('user_id', currentUser.id).maybeSingle();
-    if(error){ console.warn('Cloud pull failed:', error.message); migrateOldData(); return; }
+    if(error){ console.warn('Cloud pull failed:', error.message); migrateOldData(); blockCloudSync = wasBlocked; return; }
 
     // load local first so we have something to compare/fallback to
     migrateOldData();
@@ -919,13 +927,16 @@ async function pullAndMergeCloudData(){
       // cloud has real data -> use it as source of truth
       data = Object.assign(data, rows.data);
       ensureDefaults();
-      save();
+      blockCloudSync = wasBlocked;
+      save(); // local cache only at this point, no stale push since blockCloudSync was just lifted correctly
     } else {
       // no cloud data yet -> push current local data up
+      blockCloudSync = wasBlocked;
       await pushToCloud();
     }
   }catch(e){
     console.warn('Sync error:', e);
+    blockCloudSync = wasBlocked;
     migrateOldData();
   }
 }
@@ -951,7 +962,7 @@ async function pushToCloud(){
 // Debounced cloud push — called every time save() runs, but waits 1.5s of inactivity
 // so we don't hammer the API on every single click.
 function queueCloudSync(){
-  if(!currentUser) return;
+  if(!currentUser || blockCloudSync) return;
   if(syncTimer) clearTimeout(syncTimer);
   syncTimer = setTimeout(pushToCloud, 1500);
 }
@@ -997,6 +1008,15 @@ async function checkExistingSession(){
   }catch(e){}
   return false;
 }
+
+// Re-pull latest cloud data whenever the tab/app becomes visible again (e.g. switching back
+// from another app, or unlocking the phone). Keeps multi-device data fresh without needing
+// a manual refresh every time.
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible' && currentUser){
+    pullAndMergeCloudData().then(() => { renderAll(); });
+  }
+});
 // ===== END SUPABASE CLOUD SYNC =====
 
 
